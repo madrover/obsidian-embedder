@@ -467,3 +467,31 @@
     text-align: right;
     font-size: var(--font-ui-smaller);
 }
+
+/* Drive image links (![alt](https://drive.google.com/…)): hide the broken image until the swap */
+img[src*="drive.google.com"]:not([data-drive-embed="ready"]),
+img[src*="docs.google.com"]:not([data-drive-embed="ready"]) {
+    visibility: hidden;
+}
+
+.drive-embed-clickable {
+    cursor: pointer;
+}
+
+.drive-embed-inline {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 6px;
+    background-color: var(--background-secondary);
+    color: var(--text-muted);
+    font-size: var(--font-ui-smaller);
+}
+
+.drive-embed-inline.drive-embed-error {
+    color: var(--text-error);
+}
+
+.drive-embed-inline button {
+    margin-left: 6px;
+    font-size: var(--font-ui-smaller);
+}

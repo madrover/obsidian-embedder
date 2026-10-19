@@ -12,6 +12,8 @@ import { GoogleDriveUploader } from './src/uploader';
 import { UploadModal, UploadModalResult } from './src/upload-modal';
 import { EmbedGenerator, EMBED_BLOCK_LANGUAGE } from './src/embed-generator';
 import { EmbedRenderer } from './src/embed-renderer';
+import { MediaLoader } from './src/media-loader';
+import { ImageSwapper } from './src/image-swapper';
 
 export default class DriveEmbedderPlugin extends Plugin {
     settings: DriveEmbedderSettings;
@@ -19,7 +21,9 @@ export default class DriveEmbedderPlugin extends Plugin {
     private driveClient: DriveClient | null = null;
     private uploader: GoogleDriveUploader | null = null;
     private embedGenerator: EmbedGenerator;
+    private loader: MediaLoader;
     private renderer: EmbedRenderer;
+    private swapper: ImageSwapper;
 
     async onload() {
         await this.loadSettings();
@@ -29,14 +33,24 @@ export default class DriveEmbedderPlugin extends Plugin {
         // Initialize OAuth, Drive client and uploader if credentials exist
         this.initializeServices();
 
-        // Render private Drive files from `drive-embed` code blocks
+        // Private Drive files are downloaded with the OAuth token and shared by both renderers
         const settings = () => this.settings;
-        this.renderer = new EmbedRenderer({
+        this.loader = new MediaLoader({
             getClient: () => this.driveClient,
             get autoLoadLimitMB() { return settings().autoLoadLimitMB; },
             get cacheLimitMB() { return settings().cacheLimitMB; }
         });
+
+        // `drive-embed` code blocks
+        this.renderer = new EmbedRenderer(this.loader);
         this.registerMarkdownCodeBlockProcessor(EMBED_BLOCK_LANGUAGE, this.renderer.process);
+
+        // Standard `![alt](https://drive.google.com/…)` images, in every view and window
+        this.swapper = new ImageSwapper(this.loader);
+        this.registerMarkdownPostProcessor((el) => this.swapper.scan(el));
+        this.app.workspace.onLayoutReady(() => this.swapper.attach(document));
+        this.registerEvent(this.app.workspace.on('window-open', (_win, win) => this.swapper.attach(win.document)));
+        this.registerEvent(this.app.workspace.on('window-close', (_win, win) => this.swapper.detach(win.document)));
 
         // Uploading needs the desktop file picker and OAuth flow
         if (!Platform.isMobile) {
@@ -60,7 +74,8 @@ export default class DriveEmbedderPlugin extends Plugin {
     }
 
     onunload() {
-        this.renderer?.clear();
+        this.swapper?.detachAll();
+        this.loader?.clear();
         console.debug('Drive Embedder unloaded');
     }
 
@@ -134,7 +149,7 @@ export default class DriveEmbedderPlugin extends Plugin {
         this.settings.googleAccessToken = '';
         this.settings.googleRefreshToken = '';
         this.settings.tokenExpiresAt = 0;
-        this.renderer.clear();
+        this.loader.clear();
         await this.saveSettings();
         new Notice('disconnected from Google Drive.');
     }

@@ -1,11 +1,13 @@
 /**
  * Drive Embedder - Embed Code Generator
- * Writes a `drive-embed` code block that the plugin renders with the OAuth token,
- * so files can stay private in Drive.
+ * Uploads insert a standard `![name|width](drive URL)` image link, rendered by the image
+ * swapper with the OAuth token so files can stay private in Drive. `drive-embed` code blocks
+ * are still parsed and rendered for notes that use them.
  */
 
 import { DriveUploadResult, EmbedOptions } from './types';
 import { getFileTypeInfo } from './size-presets';
+import { driveOpenUrl } from './drive-url';
 
 export const EMBED_BLOCK_LANGUAGE = 'drive-embed';
 
@@ -49,9 +51,25 @@ export function parseEmbedBlock(source: string): Partial<EmbedBlock> {
 
 export class EmbedGenerator {
     /**
-     * Generate embed code for a file uploaded to Google Drive
+     * Generate an image link for a file uploaded to Google Drive.
+     * Pixel widths from the size preset become `|width`; percentage presets fill the line.
      */
     generateEmbed(
+        fileName: string,
+        uploadResult: DriveUploadResult,
+        options: EmbedOptions
+    ): string {
+        const alt = fileName.replace(/[[\]|]/g, ' ').replace(/\s+/g, ' ').trim();
+        const px = /^(\d+)px$/.exec(options.size.width);
+        const width = px ? `|${px[1]}` : '';
+        const image = `![${alt}${width}](${driveOpenUrl(uploadResult.fileId)})`;
+        return options.showTitle ? `**📁 ${fileName}**\n\n${image}` : image;
+    }
+
+    /**
+     * Generate a `drive-embed` code block (kept for callers that want the block form).
+     */
+    generateEmbedBlock(
         fileName: string,
         uploadResult: DriveUploadResult,
         options: EmbedOptions

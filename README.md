@@ -7,7 +7,7 @@ Upload local files to Google Drive and embed them directly in your Obsidian note
 ## Features
 
 - 🚀 **One-Click Upload**: Upload files directly to Google Drive from Obsidian
-- 🔒 **Private Embeds**: Inserts a `drive-embed` block rendered with your OAuth token; files are never made public
+- 🔒 **Private Embeds**: Standard `![alt](drive URL)` images rendered with your OAuth token; files are never made public
 - 📐 **Intuitive Size Options**: Clear size labels like "Compact", "Medium", "Large", "Full Width"
 - 🎵 **Audio Optimized**: Special compact sizes for audio files ("Slim", "Standard")
 - 📂 **Multi-Format Support**: Video (MP4, WebM, MOV, AVI), Audio (MP3, WAV, OGG, M4A), PDF, Images (JPG, PNG, GIF, WebP, SVG)
@@ -111,9 +111,26 @@ Before using the plugin, you need to set up Google OAuth credentials:
 | 📄 Document | PDF |
 | 🖼️ Image | JPG, PNG, GIF, WebP, SVG |
 
-## Embed Format
+## Embed Formats
 
-Uploading inserts a code block like this one; the plugin renders it:
+### Image links (default)
+
+Uploading inserts a standard Markdown image pointing at the Drive file:
+
+```markdown
+![report.pdf](https://drive.google.com/open?id=1AbC...xyz)
+![Site plan|600](https://drive.google.com/open?id=1AbC...xyz)
+```
+
+Any Drive file link works: `open?id=…`, `/file/d/<id>/view`, `uc?id=…`, `thumbnail?id=…`. To embed a file a note already links, add `!` in front of the link. The plugin downloads the private file with your token and swaps it in, in reading view, Live Preview, hover previews, canvas and popout windows. Images stay images; video and audio become players; PDFs open inline on desktop and show a first-page thumbnail on mobile. Other types and Google Docs show a short message with an "Open in Drive" link. In reading view, clicking an image opens it in Drive.
+
+Width uses Obsidian's own syntax, `![alt|600](…)`. Inside a table the pipe must be escaped: `![alt\|150](…)`.
+
+Live Preview support works by watching the editor for Drive images, so it depends on how Obsidian draws images; if a future Obsidian version changes that, reading view keeps working.
+
+### Code blocks
+
+`drive-embed` blocks are still rendered, for notes that use them:
 
 ````markdown
 ```drive-embed
@@ -125,7 +142,7 @@ title: true
 ```
 ````
 
-`size` is a preset id from the size options above. Images, audio and video play from the downloaded file; PDFs open in an inline viewer on desktop and show a first-page thumbnail on mobile. Each embed links to the file in Drive.
+`size` is a preset id from the size options above, and each block links to the file in Drive.
 
 ## Security & Privacy
 

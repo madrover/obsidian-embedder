@@ -27,7 +27,7 @@ __export(main_exports, {
   default: () => DriveEmbedderPlugin
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian5 = require("obsidian");
+var import_obsidian6 = require("obsidian");
 
 // src/settings.ts
 var DEFAULT_SETTINGS = {
@@ -1020,6 +1020,46 @@ var UploadModal = class extends import_obsidian3.Modal {
   }
 };
 
+// src/drive-url.ts
+var ID = "([A-Za-z0-9_-]{10,})";
+var FILE_PATH = new RegExp(`^/file/d/${ID}(?:/(?:view|preview|edit))?/?$`);
+function parseDriveFileId(raw) {
+  if (!raw)
+    return null;
+  let url;
+  try {
+    url = new URL(raw);
+  } catch (e) {
+    return null;
+  }
+  if (url.protocol !== "https:")
+    return null;
+  if (url.hostname === "drive.google.com") {
+    const path = url.pathname.replace(/^\/u\/\d+/, "");
+    const fileMatch = FILE_PATH.exec(path);
+    if (fileMatch)
+      return fileMatch[1];
+    if (path === "/open" || path === "/uc" || path === "/thumbnail") {
+      return idParam(url);
+    }
+    return null;
+  }
+  if (url.hostname === "docs.google.com" && url.pathname === "/uc") {
+    return idParam(url);
+  }
+  return null;
+}
+function idParam(url) {
+  const id = url.searchParams.get("id");
+  return id && new RegExp(`^${ID}$`).test(id) ? id : null;
+}
+function driveViewUrl(id) {
+  return `https://drive.google.com/file/d/${encodeURIComponent(id)}/view`;
+}
+function driveOpenUrl(id) {
+  return `https://drive.google.com/open?id=${encodeURIComponent(id)}`;
+}
+
 // src/embed-generator.ts
 var EMBED_BLOCK_LANGUAGE = "drive-embed";
 function serializeEmbedBlock(block) {
@@ -1052,9 +1092,22 @@ function parseEmbedBlock(source) {
 }
 var EmbedGenerator = class {
   /**
-   * Generate embed code for a file uploaded to Google Drive
+   * Generate an image link for a file uploaded to Google Drive.
+   * Pixel widths from the size preset become `|width`; percentage presets fill the line.
    */
   generateEmbed(fileName, uploadResult, options) {
+    const alt = fileName.replace(/[[\]|]/g, " ").replace(/\s+/g, " ").trim();
+    const px = /^(\d+)px$/.exec(options.size.width);
+    const width = px ? `|${px[1]}` : "";
+    const image = `![${alt}${width}](${driveOpenUrl(uploadResult.fileId)})`;
+    return options.showTitle ? `**\u{1F4C1} ${fileName}**
+
+${image}` : image;
+  }
+  /**
+   * Generate a `drive-embed` code block (kept for callers that want the block form).
+   */
+  generateEmbedBlock(fileName, uploadResult, options) {
     var _a;
     return serializeEmbedBlock({
       id: uploadResult.fileId,
@@ -1074,97 +1127,77 @@ var EmbedGenerator = class {
 
 // src/embed-renderer.ts
 var import_obsidian4 = require("obsidian");
+
+// src/media-loader.ts
 var MB = 1024 * 1024;
 function categoryFor(mime, name) {
   var _a;
-  const fromName = (_a = getFileTypeInfo(name)) == null ? void 0 : _a.category;
-  if (fromName)
-    return fromName;
   if (mime.startsWith("image/"))
     return "image";
   if (mime.startsWith("audio/"))
     return "audio";
   if (mime.startsWith("video/"))
     return "video";
-  return "document";
+  const fromName = (_a = getFileTypeInfo(name)) == null ? void 0 : _a.category;
+  return fromName != null ? fromName : "document";
 }
 function formatSize(bytes) {
   return bytes >= MB ? `${(bytes / MB).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`;
 }
-var EmbedRenderer = class {
+function isGoogleNative(meta) {
+  return meta.mimeType.startsWith("application/vnd.google-apps");
+}
+function describeError(error) {
+  if (error instanceof DriveError) {
+    if (error.status === 404) {
+      return "File not found in Google Drive, or no access to it. If you connected before v1.1.1, reconnect in the plugin settings on desktop.";
+    }
+    if (error.status === 403) {
+      return "No access to this file. If you connected before v1.1.1, reconnect to grant read access to Drive.";
+    }
+    if (error.status === 401) {
+      return "Google Drive session expired. Reconnect in the plugin settings on desktop.";
+    }
+  }
+  return error instanceof Error ? error.message : String(error);
+}
+var MediaLoader = class {
   constructor(host) {
     this.host = host;
     /** Insertion order is recency order: hits are moved to the end. */
     this.cache = /* @__PURE__ */ new Map();
     this.cacheBytes = 0;
     this.inFlight = /* @__PURE__ */ new Map();
-    this.process = async (source, el, _ctx) => {
-      var _a;
-      const block = parseEmbedBlock(source);
-      const container = el.createDiv({ cls: "drive-embed" });
-      if (!block.id) {
-        this.showMessage(container, 'Drive embed is missing an "id:" line.', "error");
-        return;
-      }
-      const id = block.id;
-      const name = block.name || id;
-      const mime = block.mime || ((_a = getFileTypeInfo(name)) == null ? void 0 : _a.mimeType) || "";
-      const category = categoryFor(mime, name);
-      const size = getSizeById(category, block.size || "");
-      container.style.width = size.width;
-      if (block.title) {
-        container.createDiv({ cls: "drive-embed-title", text: `\u{1F4C1} ${name}` });
-      }
-      const body = container.createDiv({ cls: "drive-embed-body" });
-      this.addFooter(container, id);
-      const client = this.host.getClient();
-      if (!client) {
-        this.showMessage(body, "Not connected to Google Drive. Connect in the plugin settings on desktop.", "error");
-        return;
-      }
-      const cached = this.cache.get(id);
-      if (cached) {
-        this.touch(id, cached);
-        this.renderMedia(body, category, cached.url, name, size.height);
-        return;
-      }
-      this.showMessage(body, "Loading from Google Drive\u2026", "loading");
-      try {
-        const meta = await client.getMetadata(id);
-        if (meta.mimeType.startsWith("application/vnd.google-apps")) {
-          this.showMessage(body, "This is a Google Docs file. Open it in Drive.", "info");
-          return;
-        }
-        if (category === "document" && import_obsidian4.Platform.isMobile) {
-          await this.renderPdfPreview(body, client, meta);
-          return;
-        }
-        const limit = this.host.autoLoadLimitMB * MB;
-        if (meta.size !== void 0 && limit > 0 && meta.size > limit) {
-          this.renderLoadCard(body, client, meta, category, size.height);
-          return;
-        }
-        await this.loadAndRender(body, client, meta, category, size.height);
-      } catch (error) {
-        this.showError(body, error);
-      }
-    };
+    this.metadata = /* @__PURE__ */ new Map();
   }
-  async loadAndRender(body, client, meta, category, height) {
-    this.showMessage(body, "Loading from Google Drive\u2026", "loading");
-    try {
-      const url = await this.getBlobUrl(client, meta);
-      this.renderMedia(body, category, url, meta.name, height);
-    } catch (error) {
-      this.showError(body, error);
+  getClient() {
+    return this.host.getClient();
+  }
+  /** True when the file is small enough to download without asking. */
+  autoLoads(meta) {
+    const limit = this.host.autoLoadLimitMB * MB;
+    return meta.size === void 0 || limit <= 0 || meta.size <= limit;
+  }
+  cachedUrl(id) {
+    const entry = this.cache.get(id);
+    if (!entry)
+      return null;
+    this.touch(id, entry);
+    return entry.url;
+  }
+  getMetadata(client, id) {
+    let pending = this.metadata.get(id);
+    if (!pending) {
+      pending = client.getMetadata(id);
+      this.metadata.set(id, pending);
+      pending.catch(() => this.metadata.delete(id));
     }
+    return pending;
   }
   getBlobUrl(client, meta) {
-    const cached = this.cache.get(meta.id);
-    if (cached) {
-      this.touch(meta.id, cached);
-      return Promise.resolve(cached.url);
-    }
+    const cached = this.cachedUrl(meta.id);
+    if (cached)
+      return Promise.resolve(cached);
     let pending = this.inFlight.get(meta.id);
     if (!pending) {
       pending = client.download(meta.id).then((buffer) => {
@@ -1176,80 +1209,23 @@ var EmbedRenderer = class {
     }
     return pending;
   }
-  renderMedia(body, category, url, name, height) {
-    body.empty();
-    switch (category) {
-      case "image": {
-        const img = body.createEl("img", { cls: "drive-embed-image", attr: { src: url, alt: name } });
-        if (height !== "auto")
-          img.style.height = height;
-        break;
-      }
-      case "audio":
-        body.createEl("audio", { cls: "drive-embed-audio", attr: { src: url, controls: "", preload: "metadata" } });
-        break;
-      case "video": {
-        const video = body.createEl("video", { cls: "drive-embed-video", attr: { src: url, controls: "", preload: "metadata" } });
-        video.style.height = height;
-        break;
-      }
-      default: {
-        const frame = body.createEl("iframe", { cls: "drive-embed-document", attr: { src: url, title: name } });
-        frame.style.height = height;
-      }
+  /** First-page thumbnail (used for PDFs on mobile); null when Drive has none. */
+  async getThumbnailUrl(client, meta) {
+    const key = `${meta.id}#thumb`;
+    const cached = this.cachedUrl(key);
+    if (cached)
+      return cached;
+    if (!meta.thumbnailLink)
+      return null;
+    try {
+      const response = await client.request({ url: meta.thumbnailLink });
+      const url = URL.createObjectURL(new Blob([response.arrayBuffer], { type: "image/png" }));
+      this.store(key, { url, bytes: response.arrayBuffer.byteLength });
+      return url;
+    } catch (error) {
+      console.debug("Drive Embedder: thumbnail unavailable", error);
+      return null;
     }
-  }
-  /** Mobile has no inline PDF viewer for blob URLs: show the first-page thumbnail. */
-  async renderPdfPreview(body, client, meta) {
-    body.empty();
-    if (meta.thumbnailLink) {
-      try {
-        const response = await client.request({ url: meta.thumbnailLink });
-        const url = URL.createObjectURL(new Blob([response.arrayBuffer], { type: "image/png" }));
-        this.store(`${meta.id}#thumb`, { url, bytes: response.arrayBuffer.byteLength });
-        body.createEl("img", { cls: "drive-embed-image", attr: { src: url, alt: meta.name } });
-        return;
-      } catch (error) {
-        console.debug("Drive Embedder: thumbnail unavailable", error);
-      }
-    }
-    this.showMessage(body, "PDF preview is not available on mobile. Open it in Drive.", "info");
-  }
-  renderLoadCard(body, client, meta, category, height) {
-    var _a;
-    body.empty();
-    const card = body.createDiv({ cls: "drive-embed-message drive-embed-info" });
-    card.createSpan({ text: `${meta.name} is ${formatSize((_a = meta.size) != null ? _a : 0)}. ` });
-    const button = card.createEl("button", { text: "Load" });
-    button.addEventListener("click", () => {
-      void this.loadAndRender(body, client, meta, category, height);
-    });
-  }
-  addFooter(container, id) {
-    const footer = container.createDiv({ cls: "drive-embed-footer" });
-    footer.createEl("a", {
-      text: "Open in Drive",
-      href: `https://drive.google.com/file/d/${encodeURIComponent(id)}/view`,
-      attr: { target: "_blank", rel: "noopener" }
-    });
-  }
-  showMessage(target, text, kind) {
-    target.empty();
-    target.createDiv({ cls: `drive-embed-message drive-embed-${kind}`, text });
-  }
-  showError(target, error) {
-    console.error("Drive Embedder: render failed", error);
-    let text = error instanceof Error ? error.message : String(error);
-    if (error instanceof DriveError) {
-      if (error.status === 404) {
-        text = "File not found in Google Drive, or no access to it. If you connected before v1.1.1, reconnect in the plugin settings on desktop.";
-      } else if (error.status === 403) {
-        text = "No access to this file. If you connected before v1.1.1, reconnect to grant read access to Drive.";
-      } else if (error.status === 401) {
-        text = "Google Drive session expired. Reconnect in the plugin settings on desktop.";
-      }
-    }
-    this.showMessage(target, text, "error");
   }
   touch(key, entry) {
     this.cache.delete(key);
@@ -1279,11 +1255,298 @@ var EmbedRenderer = class {
     }
     this.cache.clear();
     this.cacheBytes = 0;
+    this.metadata.clear();
+  }
+};
+
+// src/embed-renderer.ts
+var EmbedRenderer = class {
+  constructor(loader) {
+    this.loader = loader;
+    this.process = async (source, el, _ctx) => {
+      var _a;
+      const block = parseEmbedBlock(source);
+      const container = el.createDiv({ cls: "drive-embed" });
+      if (!block.id) {
+        this.showMessage(container, 'Drive embed is missing an "id:" line.', "error");
+        return;
+      }
+      const id = block.id;
+      const name = block.name || id;
+      const mime = block.mime || ((_a = getFileTypeInfo(name)) == null ? void 0 : _a.mimeType) || "";
+      const category = categoryFor(mime, name);
+      const size = getSizeById(category, block.size || "");
+      container.style.width = size.width;
+      if (block.title) {
+        container.createDiv({ cls: "drive-embed-title", text: `\u{1F4C1} ${name}` });
+      }
+      const body = container.createDiv({ cls: "drive-embed-body" });
+      this.addFooter(container, id);
+      const client = this.loader.getClient();
+      if (!client) {
+        this.showMessage(body, "Not connected to Google Drive. Connect in the plugin settings on desktop.", "error");
+        return;
+      }
+      const cached = this.loader.cachedUrl(id);
+      if (cached) {
+        this.renderMedia(body, category, cached, name, size.height);
+        return;
+      }
+      this.showMessage(body, "Loading from Google Drive\u2026", "loading");
+      try {
+        const meta = await this.loader.getMetadata(client, id);
+        if (isGoogleNative(meta)) {
+          this.showMessage(body, "This is a Google Docs file. Open it in Drive.", "info");
+          return;
+        }
+        if (category === "document" && import_obsidian4.Platform.isMobile) {
+          await this.renderPdfPreview(body, client, meta);
+          return;
+        }
+        if (!this.loader.autoLoads(meta)) {
+          this.renderLoadCard(body, client, meta, category, size.height);
+          return;
+        }
+        await this.loadAndRender(body, client, meta, category, size.height);
+      } catch (error) {
+        this.showError(body, error);
+      }
+    };
+  }
+  async loadAndRender(body, client, meta, category, height) {
+    this.showMessage(body, "Loading from Google Drive\u2026", "loading");
+    try {
+      const url = await this.loader.getBlobUrl(client, meta);
+      this.renderMedia(body, category, url, meta.name, height);
+    } catch (error) {
+      this.showError(body, error);
+    }
+  }
+  renderMedia(body, category, url, name, height) {
+    body.empty();
+    switch (category) {
+      case "image": {
+        const img = body.createEl("img", { cls: "drive-embed-image", attr: { src: url, alt: name } });
+        if (height !== "auto")
+          img.style.height = height;
+        break;
+      }
+      case "audio":
+        body.createEl("audio", { cls: "drive-embed-audio", attr: { src: url, controls: "", preload: "metadata" } });
+        break;
+      case "video": {
+        const video = body.createEl("video", { cls: "drive-embed-video", attr: { src: url, controls: "", preload: "metadata" } });
+        video.style.height = height;
+        break;
+      }
+      default: {
+        const frame = body.createEl("iframe", { cls: "drive-embed-document", attr: { src: url, title: name } });
+        frame.style.height = height;
+      }
+    }
+  }
+  /** Mobile has no inline PDF viewer for blob URLs: show the first-page thumbnail. */
+  async renderPdfPreview(body, client, meta) {
+    const url = await this.loader.getThumbnailUrl(client, meta);
+    body.empty();
+    if (url) {
+      body.createEl("img", { cls: "drive-embed-image", attr: { src: url, alt: meta.name } });
+    } else {
+      this.showMessage(body, "PDF preview is not available on mobile. Open it in Drive.", "info");
+    }
+  }
+  renderLoadCard(body, client, meta, category, height) {
+    var _a;
+    body.empty();
+    const card = body.createDiv({ cls: "drive-embed-message drive-embed-info" });
+    card.createSpan({ text: `${meta.name} is ${formatSize((_a = meta.size) != null ? _a : 0)}. ` });
+    const button = card.createEl("button", { text: "Load" });
+    button.addEventListener("click", () => {
+      void this.loadAndRender(body, client, meta, category, height);
+    });
+  }
+  addFooter(container, id) {
+    const footer = container.createDiv({ cls: "drive-embed-footer" });
+    footer.createEl("a", {
+      text: "Open in Drive",
+      href: driveViewUrl(id),
+      attr: { target: "_blank", rel: "noopener" }
+    });
+  }
+  showMessage(target, text, kind) {
+    target.empty();
+    target.createDiv({ cls: `drive-embed-message drive-embed-${kind}`, text });
+  }
+  showError(target, error) {
+    console.error("Drive Embedder: render failed", error);
+    this.showMessage(target, describeError(error), "error");
+  }
+};
+
+// src/image-swapper.ts
+var import_obsidian5 = require("obsidian");
+var CANDIDATES = 'img[src*="drive.google.com"], img[src*="docs.google.com"]';
+var STATE = "driveEmbed";
+var STATE_ID = "driveEmbedId";
+var ImageSwapper = class {
+  constructor(loader) {
+    this.loader = loader;
+    this.observers = /* @__PURE__ */ new Map();
+    /** Also used as a reading-view post-processor, before elements are attached. */
+    this.scan = (root) => {
+      root.querySelectorAll(CANDIDATES).forEach((img) => this.handle(img));
+    };
+  }
+  attach(doc) {
+    if (this.observers.has(doc) || !doc.body)
+      return;
+    const observer = new MutationObserver((records) => {
+      for (const record of records) {
+        if (record.type === "attributes") {
+          if (record.target instanceof HTMLImageElement)
+            this.handle(record.target);
+          continue;
+        }
+        record.addedNodes.forEach((node) => {
+          if (node instanceof HTMLImageElement)
+            this.handle(node);
+          else if (node instanceof HTMLElement)
+            this.scan(node);
+        });
+      }
+    });
+    observer.observe(doc.body, { childList: true, subtree: true, attributes: true, attributeFilter: ["src"] });
+    this.observers.set(doc, observer);
+    this.scan(doc.body);
+  }
+  detach(doc) {
+    var _a;
+    (_a = this.observers.get(doc)) == null ? void 0 : _a.disconnect();
+    this.observers.delete(doc);
+  }
+  detachAll() {
+    for (const observer of this.observers.values())
+      observer.disconnect();
+    this.observers.clear();
+  }
+  handle(img) {
+    const id = parseDriveFileId(img.getAttribute("src"));
+    if (!id)
+      return;
+    if (img.dataset[STATE] === "loading" && img.dataset[STATE_ID] === id)
+      return;
+    img.dataset[STATE] = "loading";
+    img.dataset[STATE_ID] = id;
+    void this.swap(img, id);
+  }
+  async swap(img, id) {
+    const client = this.loader.getClient();
+    if (!client) {
+      this.replaceWithMessage(img, id, "Not connected to Google Drive.");
+      return;
+    }
+    try {
+      const meta = await this.loader.getMetadata(client, id);
+      if (isGoogleNative(meta)) {
+        this.replaceWithMessage(img, id, `${meta.name}: Google Docs file.`, "info");
+        return;
+      }
+      const category = categoryFor(meta.mimeType, meta.name);
+      if (category === "document" && meta.mimeType !== "application/pdf") {
+        this.replaceWithMessage(img, id, `${meta.name} can't be shown inline.`, "info");
+        return;
+      }
+      if (!this.loader.autoLoads(meta)) {
+        this.replaceWithLoadButton(img, id, meta);
+        return;
+      }
+      await this.show(img, id, meta);
+    } catch (error) {
+      console.error("Drive Embedder: image swap failed", error);
+      this.replaceWithMessage(img, id, describeError(error));
+    }
+  }
+  async show(img, id, meta) {
+    const client = this.loader.getClient();
+    if (!client)
+      return;
+    const category = categoryFor(meta.mimeType, meta.name);
+    if (category === "document") {
+      if (import_obsidian5.Platform.isMobile) {
+        const thumb = await this.loader.getThumbnailUrl(client, meta);
+        if (!thumb) {
+          this.replaceWithMessage(img, id, `${meta.name}: PDF preview is not available on mobile.`, "info");
+          return;
+        }
+        this.setImage(img, id, thumb);
+        return;
+      }
+      const url2 = await this.loader.getBlobUrl(client, meta);
+      const frame = createEl("iframe", { cls: "drive-embed-document", attr: { src: url2, title: meta.name } });
+      this.replace(img, frame);
+      return;
+    }
+    const url = await this.loader.getBlobUrl(client, meta);
+    if (category === "image") {
+      this.setImage(img, id, url);
+    } else {
+      const media = createEl(category, {
+        cls: category === "video" ? "drive-embed-video" : "drive-embed-audio",
+        attr: { src: url, controls: "", preload: "metadata", title: meta.name }
+      });
+      this.replace(img, media);
+    }
+  }
+  setImage(img, id, url) {
+    if (img.dataset[STATE_ID] !== id)
+      return;
+    img.setAttribute("src", url);
+    img.dataset[STATE] = "ready";
+    if (!img.closest(".cm-editor") && !img.dataset.driveEmbedClick) {
+      img.dataset.driveEmbedClick = "true";
+      img.addClass("drive-embed-clickable");
+      img.addEventListener("click", () => window.open(driveViewUrl(id)));
+    }
+  }
+  /** Swap the <img> for another element, keeping Obsidian's width from `![alt|600](…)`. */
+  replace(img, el) {
+    const width = img.getAttribute("width");
+    if (width)
+      el.style.width = /^\d+$/.test(width) ? `${width}px` : width;
+    el.dataset[STATE] = "ready";
+    img.replaceWith(el);
+  }
+  replaceWithMessage(img, id, text, kind = "error") {
+    img.dataset[STATE] = "error";
+    const span = createSpan({ cls: `drive-embed-inline drive-embed-${kind}` });
+    span.createSpan({ text: `${text} ` });
+    span.createEl("a", { text: "Open in Drive", href: driveViewUrl(id), attr: { target: "_blank", rel: "noopener" } });
+    this.replace(img, span);
+  }
+  replaceWithLoadButton(img, id, meta) {
+    var _a;
+    const span = createSpan({ cls: "drive-embed-inline drive-embed-info" });
+    span.createSpan({ text: `${meta.name} (${formatSize((_a = meta.size) != null ? _a : 0)}) ` });
+    const button = span.createEl("button", { text: "Load" });
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const placeholder = createEl("img");
+      placeholder.dataset[STATE_ID] = id;
+      const width = img.getAttribute("width");
+      if (width)
+        placeholder.setAttribute("width", width);
+      span.replaceWith(placeholder);
+      void this.show(placeholder, id, meta).catch((error) => {
+        this.replaceWithMessage(placeholder, id, describeError(error));
+      });
+    });
+    this.replace(img, span);
   }
 };
 
 // main.ts
-var DriveEmbedderPlugin = class extends import_obsidian5.Plugin {
+var DriveEmbedderPlugin = class extends import_obsidian6.Plugin {
   constructor() {
     super(...arguments);
     this.oauthFlow = null;
@@ -1295,7 +1558,7 @@ var DriveEmbedderPlugin = class extends import_obsidian5.Plugin {
     this.embedGenerator = new EmbedGenerator();
     this.initializeServices();
     const settings = () => this.settings;
-    this.renderer = new EmbedRenderer({
+    this.loader = new MediaLoader({
       getClient: () => this.driveClient,
       get autoLoadLimitMB() {
         return settings().autoLoadLimitMB;
@@ -1304,8 +1567,14 @@ var DriveEmbedderPlugin = class extends import_obsidian5.Plugin {
         return settings().cacheLimitMB;
       }
     });
+    this.renderer = new EmbedRenderer(this.loader);
     this.registerMarkdownCodeBlockProcessor(EMBED_BLOCK_LANGUAGE, this.renderer.process);
-    if (!import_obsidian5.Platform.isMobile) {
+    this.swapper = new ImageSwapper(this.loader);
+    this.registerMarkdownPostProcessor((el) => this.swapper.scan(el));
+    this.app.workspace.onLayoutReady(() => this.swapper.attach(document));
+    this.registerEvent(this.app.workspace.on("window-open", (_win, win) => this.swapper.attach(win.document)));
+    this.registerEvent(this.app.workspace.on("window-close", (_win, win) => this.swapper.detach(win.document)));
+    if (!import_obsidian6.Platform.isMobile) {
       this.addRibbonIcon("cloud-upload", "Drive Embedder: upload file", () => {
         this.openUploadModal();
       });
@@ -1321,8 +1590,9 @@ var DriveEmbedderPlugin = class extends import_obsidian5.Plugin {
     console.debug("Drive Embedder loaded");
   }
   onunload() {
-    var _a;
-    (_a = this.renderer) == null ? void 0 : _a.clear();
+    var _a, _b;
+    (_a = this.swapper) == null ? void 0 : _a.detachAll();
+    (_b = this.loader) == null ? void 0 : _b.clear();
     console.debug("Drive Embedder unloaded");
   }
   async loadSettings() {
@@ -1364,7 +1634,7 @@ var DriveEmbedderPlugin = class extends import_obsidian5.Plugin {
   }
   async startOAuthFlow() {
     if (!this.oauthFlow) {
-      new import_obsidian5.Notice("please enter Google OAuth settings first.");
+      new import_obsidian6.Notice("please enter Google OAuth settings first.");
       return false;
     }
     try {
@@ -1373,12 +1643,12 @@ var DriveEmbedderPlugin = class extends import_obsidian5.Plugin {
       this.settings.googleRefreshToken = tokens.refreshToken;
       this.settings.tokenExpiresAt = tokens.expiresAt;
       await this.saveSettings();
-      new import_obsidian5.Notice("\u2705 connected to Google Drive successfully!");
+      new import_obsidian6.Notice("\u2705 connected to Google Drive successfully!");
       return true;
     } catch (error) {
       console.error("OAuth flow failed:", error);
       const message = error instanceof Error ? error.message : String(error);
-      new import_obsidian5.Notice(`\u274C connection failed: ${message}`);
+      new import_obsidian6.Notice(`\u274C connection failed: ${message}`);
       return false;
     }
   }
@@ -1386,20 +1656,20 @@ var DriveEmbedderPlugin = class extends import_obsidian5.Plugin {
     this.settings.googleAccessToken = "";
     this.settings.googleRefreshToken = "";
     this.settings.tokenExpiresAt = 0;
-    this.renderer.clear();
+    this.loader.clear();
     await this.saveSettings();
-    new import_obsidian5.Notice("disconnected from Google Drive.");
+    new import_obsidian6.Notice("disconnected from Google Drive.");
   }
   isConnected() {
     return !!this.settings.googleAccessToken && !!this.driveClient;
   }
   openUploadModal(editor) {
     if (!this.isConnected()) {
-      new import_obsidian5.Notice("please connect to Google Drive first (in settings).");
+      new import_obsidian6.Notice("please connect to Google Drive first (in settings).");
       return;
     }
     if (!this.uploader) {
-      new import_obsidian5.Notice("uploader initialization failed. please check settings.");
+      new import_obsidian6.Notice("uploader initialization failed. please check settings.");
       return;
     }
     new UploadModal(
@@ -1418,14 +1688,14 @@ var DriveEmbedderPlugin = class extends import_obsidian5.Plugin {
             editor.replaceSelection(embedCode);
           } else {
             await navigator.clipboard.writeText(embedCode);
-            new import_obsidian5.Notice("\u{1F4CB} embed code copied to clipboard!");
+            new import_obsidian6.Notice("\u{1F4CB} embed code copied to clipboard!");
           }
         })();
       }
     ).open();
   }
 };
-var DriveEmbedderSettingTab = class extends import_obsidian5.PluginSettingTab {
+var DriveEmbedderSettingTab = class extends import_obsidian6.PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
     this.plugin = plugin;
@@ -1443,7 +1713,7 @@ var DriveEmbedderSettingTab = class extends import_obsidian5.PluginSettingTab {
   createConnectionSection(containerEl) {
     const connectionDiv = containerEl.createDiv({ cls: "drive-embedder-connection-section" });
     const isConnected = this.plugin.isConnected();
-    new import_obsidian5.Setting(connectionDiv).setName("Connection status").setHeading();
+    new import_obsidian6.Setting(connectionDiv).setName("Connection status").setHeading();
     const statusDiv = connectionDiv.createDiv({ cls: "connection-status" });
     if (isConnected) {
       statusDiv.createSpan({ cls: "status-connected", text: "\u2705 connected to Google Drive" });
@@ -1451,17 +1721,17 @@ var DriveEmbedderSettingTab = class extends import_obsidian5.PluginSettingTab {
       statusDiv.createSpan({ cls: "status-disconnected", text: "\u274C not connected" });
     }
     if (isConnected) {
-      new import_obsidian5.Setting(connectionDiv).setName("Disconnect").setDesc("disconnect from Google Drive").addButton(
+      new import_obsidian6.Setting(connectionDiv).setName("Disconnect").setDesc("disconnect from Google Drive").addButton(
         (button) => button.setButtonText("Disconnect").setWarning().onClick(() => {
           void this.plugin.disconnectGoogleDrive().then(() => {
             this.display();
           });
         })
       );
-    } else if (import_obsidian5.Platform.isMobile) {
-      new import_obsidian5.Setting(connectionDiv).setName("Connect to Google Drive").setDesc("connect on desktop; the tokens reach this device with the vault's plugin folder");
+    } else if (import_obsidian6.Platform.isMobile) {
+      new import_obsidian6.Setting(connectionDiv).setName("Connect to Google Drive").setDesc("connect on desktop; the tokens reach this device with the vault's plugin folder");
     } else {
-      new import_obsidian5.Setting(connectionDiv).setName("Connect to Google Drive").setDesc("enter OAuth settings below, then click Connect").addButton(
+      new import_obsidian6.Setting(connectionDiv).setName("Connect to Google Drive").setDesc("enter OAuth settings below, then click Connect").addButton(
         (button) => button.setButtonText("Connect").setCta().onClick(() => {
           void this.plugin.startOAuthFlow().then((success) => {
             if (success) {
@@ -1473,14 +1743,14 @@ var DriveEmbedderSettingTab = class extends import_obsidian5.PluginSettingTab {
     }
   }
   createOAuthSection(containerEl) {
-    new import_obsidian5.Setting(containerEl).setName("Google OAuth").setHeading();
-    new import_obsidian5.Setting(containerEl).setName("Client ID").setDesc("OAuth client ID from Google Cloud Console").addText(
+    new import_obsidian6.Setting(containerEl).setName("Google OAuth").setHeading();
+    new import_obsidian6.Setting(containerEl).setName("Client ID").setDesc("OAuth client ID from Google Cloud Console").addText(
       (text) => text.setPlaceholder("xxx.apps.googleusercontent.com").setValue(this.plugin.settings.googleClientId).onChange((value) => {
         this.plugin.settings.googleClientId = value;
         void this.plugin.saveSettings();
       })
     );
-    new import_obsidian5.Setting(containerEl).setName("Client secret").setDesc("OAuth client secret from Google Cloud Console").addText(
+    new import_obsidian6.Setting(containerEl).setName("Client secret").setDesc("OAuth client secret from Google Cloud Console").addText(
       (text) => text.setPlaceholder("GOCSPX-...").setValue(this.plugin.settings.googleClientSecret).onChange((value) => {
         this.plugin.settings.googleClientSecret = value;
         void this.plugin.saveSettings();
@@ -1488,8 +1758,8 @@ var DriveEmbedderSettingTab = class extends import_obsidian5.PluginSettingTab {
     );
   }
   createDriveSection(containerEl) {
-    new import_obsidian5.Setting(containerEl).setName("Google Drive").setHeading();
-    new import_obsidian5.Setting(containerEl).setName("Upload folder").setDesc("Google Drive folder path for uploaded files").addText(
+    new import_obsidian6.Setting(containerEl).setName("Google Drive").setHeading();
+    new import_obsidian6.Setting(containerEl).setName("Upload folder").setDesc("Google Drive folder path for uploaded files").addText(
       (text) => text.setPlaceholder("Obsidian/DriveEmbedder").setValue(this.plugin.settings.driveFolder).onChange((value) => {
         this.plugin.settings.driveFolder = value;
         void this.plugin.saveSettings();
@@ -1497,9 +1767,9 @@ var DriveEmbedderSettingTab = class extends import_obsidian5.PluginSettingTab {
     );
   }
   createRenderingSection(containerEl) {
-    new import_obsidian5.Setting(containerEl).setName("Rendering").setHeading();
+    new import_obsidian6.Setting(containerEl).setName("Rendering").setHeading();
     const numberSetting = (name, desc, key) => {
-      new import_obsidian5.Setting(containerEl).setName(name).setDesc(desc).addText((text) => {
+      new import_obsidian6.Setting(containerEl).setName(name).setDesc(desc).addText((text) => {
         text.inputEl.type = "number";
         text.inputEl.min = "0";
         text.setValue(String(this.plugin.settings[key])).onChange((value) => {
@@ -1515,33 +1785,33 @@ var DriveEmbedderSettingTab = class extends import_obsidian5.PluginSettingTab {
     numberSetting("Memory cache (MB)", "downloaded files kept in memory while Obsidian is open", "cacheLimitMB");
   }
   createEmbedSection(containerEl) {
-    new import_obsidian5.Setting(containerEl).setName("Embed defaults").setHeading();
-    new import_obsidian5.Setting(containerEl).setName("Show filename by default").setDesc("display filename in embed code by default").addToggle(
+    new import_obsidian6.Setting(containerEl).setName("Embed defaults").setHeading();
+    new import_obsidian6.Setting(containerEl).setName("Show filename by default").setDesc("display filename in embed code by default").addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.showTitleByDefault).onChange((value) => {
         this.plugin.settings.showTitleByDefault = value;
         void this.plugin.saveSettings();
       })
     );
-    new import_obsidian5.Setting(containerEl).setName("Default embed size").setHeading();
-    new import_obsidian5.Setting(containerEl).setName("Default video size").addDropdown(
+    new import_obsidian6.Setting(containerEl).setName("Default embed size").setHeading();
+    new import_obsidian6.Setting(containerEl).setName("Default video size").addDropdown(
       (dropdown) => dropdown.addOption("compact", "Compact").addOption("medium", "Medium").addOption("large", "Large").addOption("fullwidth", "Full width").setValue(this.plugin.settings.defaultVideoSize).onChange((value) => {
         this.plugin.settings.defaultVideoSize = value;
         void this.plugin.saveSettings();
       })
     );
-    new import_obsidian5.Setting(containerEl).setName("Default audio size").addDropdown(
+    new import_obsidian6.Setting(containerEl).setName("Default audio size").addDropdown(
       (dropdown) => dropdown.addOption("slim", "Slim").addOption("standard", "Standard").setValue(this.plugin.settings.defaultAudioSize).onChange((value) => {
         this.plugin.settings.defaultAudioSize = value;
         void this.plugin.saveSettings();
       })
     );
-    new import_obsidian5.Setting(containerEl).setName("Default document size").addDropdown(
+    new import_obsidian6.Setting(containerEl).setName("Default document size").addDropdown(
       (dropdown) => dropdown.addOption("compact", "Compact").addOption("medium", "Medium").addOption("large", "Large").addOption("fullheight", "Full height").setValue(this.plugin.settings.defaultDocumentSize).onChange((value) => {
         this.plugin.settings.defaultDocumentSize = value;
         void this.plugin.saveSettings();
       })
     );
-    new import_obsidian5.Setting(containerEl).setName("Default image size").addDropdown(
+    new import_obsidian6.Setting(containerEl).setName("Default image size").addDropdown(
       (dropdown) => dropdown.addOption("small", "Small").addOption("medium", "Medium").addOption("large", "Large").addOption("original", "Original size").setValue(this.plugin.settings.defaultImageSize).onChange((value) => {
         this.plugin.settings.defaultImageSize = value;
         void this.plugin.saveSettings();
@@ -1549,7 +1819,7 @@ var DriveEmbedderSettingTab = class extends import_obsidian5.PluginSettingTab {
     );
   }
   createHelpSection(containerEl) {
-    new import_obsidian5.Setting(containerEl).setName("Help").setHeading();
+    new import_obsidian6.Setting(containerEl).setName("Help").setHeading();
     const helpDiv = containerEl.createDiv({ cls: "drive-embedder-help" });
     const oauthDetails = helpDiv.createEl("details");
     const oauthSummary = oauthDetails.createEl("summary");
