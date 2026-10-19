@@ -411,3 +411,59 @@
         grid-template-columns: 1fr;
     }
 }
+
+/* Private Drive embeds (drive-embed code blocks) */
+.drive-embed {
+    max-width: 100%;
+    margin: 0 auto 1em;
+}
+
+.drive-embed-title {
+    font-weight: var(--font-semibold);
+    margin-bottom: 6px;
+}
+
+.drive-embed-image,
+.drive-embed-video,
+.drive-embed-document {
+    display: block;
+    width: 100%;
+    border: 0;
+    border-radius: 8px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+}
+
+.drive-embed-image {
+    object-fit: contain;
+}
+
+.drive-embed-video {
+    background-color: #000;
+}
+
+.drive-embed-audio {
+    display: block;
+    width: 100%;
+}
+
+.drive-embed-message {
+    padding: 12px 16px;
+    border-radius: 8px;
+    background-color: var(--background-secondary);
+    color: var(--text-muted);
+    font-size: var(--font-ui-small);
+}
+
+.drive-embed-message button {
+    margin-left: 8px;
+}
+
+.drive-embed-error {
+    color: var(--text-error);
+}
+
+.drive-embed-footer {
+    margin-top: 4px;
+    text-align: right;
+    font-size: var(--font-ui-smaller);
+}

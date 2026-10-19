@@ -1,11 +1,13 @@
-# Drive Embedder
+# Drive Embedder (private)
 
 Upload local files to Google Drive and embed them directly in your Obsidian notes with intuitive size options.
+
+> Private fork of [reallygood83/obsidian-embedder](https://github.com/reallygood83/obsidian-embedder). Uploads stay private in Drive: no sharing permission is added. Notes render the files by downloading them with the plugin's own OAuth token, so embeds only show inside Obsidian for the connected account.
 
 ## Features
 
 - 🚀 **One-Click Upload**: Upload files directly to Google Drive from Obsidian
-- 🔗 **Auto Embed Generation**: Automatically creates embed code for your notes
+- 🔒 **Private Embeds**: Inserts a `drive-embed` block rendered with your OAuth token; files are never made public
 - 📐 **Intuitive Size Options**: Clear size labels like "Compact", "Medium", "Large", "Full Width"
 - 🎵 **Audio Optimized**: Special compact sizes for audio files ("Slim", "Standard")
 - 📂 **Multi-Format Support**: Video (MP4, WebM, MOV, AVI), Audio (MP3, WAV, OGG, M4A), PDF, Images (JPG, PNG, GIF, WebP, SVG)
@@ -96,7 +98,8 @@ Before using the plugin, you need to set up Google OAuth credentials:
 - **Google OAuth**: Client ID and Client Secret
 - **Drive Folder**: Upload destination path (default: `Obsidian/DriveEmbedder`)
 - **Show Title**: Display filename above embed by default
-- **Default Theme**: Auto-detect system theme or force light/dark
+- **Auto-load limit (MB)**: Larger files show a "Load" button instead of downloading when the note opens (default 50, 0 = no limit)
+- **Memory cache (MB)**: Downloaded files kept in memory while Obsidian is open (default 200)
 - **Default Sizes**: Set preferred sizes for each content type
 
 ## Supported File Types
@@ -108,12 +111,33 @@ Before using the plugin, you need to set up Google OAuth credentials:
 | 📄 Document | PDF |
 | 🖼️ Image | JPG, PNG, GIF, WebP, SVG |
 
+## Embed Format
+
+Uploading inserts a code block like this one; the plugin renders it:
+
+````markdown
+```drive-embed
+id: 1AbC...xyz
+name: report.pdf
+mime: application/pdf
+size: medium
+title: true
+```
+````
+
+`size` is a preset id from the size options above. Images, audio and video play from the downloaded file; PDFs open in an inline viewer on desktop and show a first-page thumbnail on mobile. Each embed links to the file in Drive.
+
 ## Security & Privacy
 
-- Your files are uploaded to **your own Google Drive**
-- OAuth tokens are stored locally in Obsidian
+- Your files are uploaded to **your own Google Drive** and stay private: no sharing permission is added
+- Embeds only render inside Obsidian, for the connected account; they do not work in Obsidian Publish or other Markdown viewers
+- The `drive.file` scope covers files created through the same Google Cloud project, so files uploaded by other tools using that project can be rendered too
+- OAuth tokens and the client secret are stored in plain text in the plugin's `data.json`: keep that file out of git or any shared sync
 - No third-party servers involved
-- Files are set to public sharing (required for embedding)
+
+## Mobile
+
+Connect on desktop: the OAuth flow needs a local callback server. Once connected, the tokens travel with the vault's plugin folder (iCloud, Obsidian Sync) and mobile renders embeds with them. Uploading is desktop-only.
 
 ## Troubleshooting
 
@@ -121,6 +145,7 @@ Before using the plugin, you need to set up Google OAuth credentials:
 - Verify Client ID and Client Secret are correct
 - Ensure Google Drive API is enabled
 - Check OAuth consent screen is configured
+- If the connection drops every 7 days, the consent screen is in "Testing": publish it under Google Auth Platform → Audience
 
 ### Upload Fails
 - Check internet connection

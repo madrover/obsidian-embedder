@@ -62,7 +62,7 @@ export class UploadModal extends Modal {
         });
 
         contentEl.createEl('p', {
-            text: 'upload files to Google Drive and generate embed code.',
+            text: 'upload files privately to Google Drive and embed them in this note.',
             cls: 'drive-embedder-subtitle'
         });
 
@@ -312,7 +312,7 @@ export class UploadModal extends Modal {
             }
 
             // Success!
-            new Notice('✅ upload complete! embed code generated.');
+            new Notice('✅ upload complete! embed inserted.');
 
             this.onComplete({
                 file: file,

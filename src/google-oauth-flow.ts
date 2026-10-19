@@ -1,11 +1,10 @@
 /**
- * Google OAuth Flow - Browser-based authentication
- * Handles token acquisition and refresh for Google Drive API
+ * Google OAuth Flow - Browser-based authentication (desktop only)
+ * Handles token acquisition; refresh lives in DriveClient.
+ * Node and Electron modules are required lazily so the plugin still loads on mobile.
  */
-import { Notice, requestUrl } from 'obsidian';
-import { shell } from 'electron';
-import * as http from 'http';
-import * as url from 'url';
+import { Notice, Platform, requestUrl } from 'obsidian';
+import type * as httpTypes from 'http';
 import { OAuthTokens } from './types';
 
 export interface OAuthConfig {
@@ -23,7 +22,7 @@ export class GoogleOAuthFlow {
     ];
 
     private config: OAuthConfig;
-    private server: http.Server | null = null;
+    private server: httpTypes.Server | null = null;
 
     constructor(config: OAuthConfig) {
         this.config = config;
@@ -33,6 +32,14 @@ export class GoogleOAuthFlow {
      * Start the OAuth flow - opens browser and waits for callback
      */
     async startOAuthFlow(): Promise<OAuthTokens> {
+        if (!Platform.isDesktopApp) {
+            throw new Error('Connecting is only possible on desktop.');
+        }
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const http = require('http') as typeof httpTypes;
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const { shell } = require('electron') as { shell: { openExternal(url: string): Promise<void> } };
+
         // Generate PKCE code verifier and challenge for security
         const codeVerifier = this.generateCodeVerifier();
         const codeChallenge = await this.generateCodeChallenge(codeVerifier);
@@ -45,11 +52,11 @@ export class GoogleOAuthFlow {
 
                 this.server = http.createServer(async (req, res) => {
                     try {
-                        const parsedUrl = url.parse(req.url || '', true);
+                        const parsedUrl = new URL(req.url || '/', redirectUri);
 
                         if (parsedUrl.pathname === '/callback') {
-                            const code = parsedUrl.query.code as string;
-                            const error = parsedUrl.query.error as string;
+                            const code = parsedUrl.searchParams.get('code');
+                            const error = parsedUrl.searchParams.get('error');
 
                             if (error) {
                                 res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
@@ -115,53 +122,6 @@ export class GoogleOAuthFlow {
                 reject(error instanceof Error ? error : new Error(String(error)));
             }
         });
-    }
-
-    /**
-     * Refresh access token using refresh token
-     */
-    async refreshAccessToken(refreshToken: string): Promise<OAuthTokens> {
-        try {
-            const response = await requestUrl({
-                url: this.TOKEN_URL,
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/x-www-form-urlencoded'
-                },
-                body: new URLSearchParams({
-                    client_id: this.config.clientId,
-                    client_secret: this.config.clientSecret,
-                    refresh_token: refreshToken,
-                    grant_type: 'refresh_token'
-                }).toString()
-            });
-
-            if (response.status !== 200) {
-                throw new Error(`Token refresh failed: ${response.status}`);
-            }
-
-            const data = response.json;
-            const expiresAt = Date.now() + (data.expires_in * 1000);
-
-            return {
-                accessToken: data.access_token,
-                refreshToken: refreshToken, // Refresh token doesn't change
-                expiresIn: data.expires_in,
-                expiresAt: expiresAt
-            };
-        } catch (error) {
-            console.error('Token refresh error:', error);
-            const message = error instanceof Error ? error.message : String(error);
-            throw new Error(`Failed to refresh token: ${message}`);
-        }
-    }
-
-    /**
-     * Check if token is expired or about to expire (within 5 minutes)
-     */
-    isTokenExpired(expiresAt: number): boolean {
-        const bufferTime = 5 * 60 * 1000; // 5 minutes buffer
-        return Date.now() >= (expiresAt - bufferTime);
     }
 
     /**

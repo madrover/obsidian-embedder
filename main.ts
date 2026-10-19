@@ -3,41 +3,55 @@
  * Upload local files to Google Drive and embed them in Obsidian notes
  */
 
-import { Plugin, PluginSettingTab, App, Setting, Notice, Editor, MarkdownView } from 'obsidian';
-import { DriveEmbedderSettings } from './src/types';
+import { Plugin, PluginSettingTab, App, Setting, Notice, Editor, MarkdownView, Platform } from 'obsidian';
+import { DriveEmbedderSettings, OAuthTokens } from './src/types';
 import { DEFAULT_SETTINGS } from './src/settings';
 import { GoogleOAuthFlow } from './src/google-oauth-flow';
+import { DriveClient } from './src/drive-client';
 import { GoogleDriveUploader } from './src/uploader';
 import { UploadModal, UploadModalResult } from './src/upload-modal';
-import { EmbedGenerator } from './src/embed-generator';
+import { EmbedGenerator, EMBED_BLOCK_LANGUAGE } from './src/embed-generator';
+import { EmbedRenderer } from './src/embed-renderer';
 
 export default class DriveEmbedderPlugin extends Plugin {
     settings: DriveEmbedderSettings;
     private oauthFlow: GoogleOAuthFlow | null = null;
+    private driveClient: DriveClient | null = null;
     private uploader: GoogleDriveUploader | null = null;
     private embedGenerator: EmbedGenerator;
+    private renderer: EmbedRenderer;
 
     async onload() {
         await this.loadSettings();
 
         this.embedGenerator = new EmbedGenerator();
 
-        // Initialize OAuth and uploader if credentials exist
+        // Initialize OAuth, Drive client and uploader if credentials exist
         this.initializeServices();
 
-        // Add ribbon icon
-        this.addRibbonIcon('cloud-upload', 'Drive Embedder: upload file', () => {
-            this.openUploadModal();
+        // Render private Drive files from `drive-embed` code blocks
+        const settings = () => this.settings;
+        this.renderer = new EmbedRenderer({
+            getClient: () => this.driveClient,
+            get autoLoadLimitMB() { return settings().autoLoadLimitMB; },
+            get cacheLimitMB() { return settings().cacheLimitMB; }
         });
+        this.registerMarkdownCodeBlockProcessor(EMBED_BLOCK_LANGUAGE, this.renderer.process);
 
-        // Add command
-        this.addCommand({
-            id: 'upload-and-embed',
-            name: 'upload file and embed',
-            editorCallback: (editor: Editor, view: MarkdownView) => {
-                this.openUploadModal(editor);
-            }
-        });
+        // Uploading needs the desktop file picker and OAuth flow
+        if (!Platform.isMobile) {
+            this.addRibbonIcon('cloud-upload', 'Drive Embedder: upload file', () => {
+                this.openUploadModal();
+            });
+
+            this.addCommand({
+                id: 'upload-and-embed',
+                name: 'upload file and embed',
+                editorCallback: (editor: Editor, view: MarkdownView) => {
+                    this.openUploadModal(editor);
+                }
+            });
+        }
 
         // Add settings tab
         this.addSettingTab(new DriveEmbedderSettingTab(this.app, this));
@@ -46,6 +60,7 @@ export default class DriveEmbedderPlugin extends Plugin {
     }
 
     onunload() {
+        this.renderer?.clear();
         console.debug('Drive Embedder unloaded');
     }
 
@@ -67,21 +82,28 @@ export default class DriveEmbedderPlugin extends Plugin {
             });
 
             if (this.settings.googleAccessToken) {
-                this.uploader = new GoogleDriveUploader({
+                this.driveClient = new DriveClient({
                     clientId: this.settings.googleClientId,
                     clientSecret: this.settings.googleClientSecret,
                     accessToken: this.settings.googleAccessToken,
                     refreshToken: this.settings.googleRefreshToken,
                     tokenExpiresAt: this.settings.tokenExpiresAt,
-                    onTokenRefresh: async (tokens) => {
-                        this.settings.googleAccessToken = tokens.accessToken;
-                        this.settings.googleRefreshToken = tokens.refreshToken;
-                        this.settings.tokenExpiresAt = tokens.expiresAt;
-                        await this.saveSettings();
-                    }
+                    onTokenRefresh: (tokens) => this.persistTokens(tokens)
                 });
+                this.uploader = new GoogleDriveUploader(this.driveClient);
+                return;
             }
         }
+        this.driveClient = null;
+        this.uploader = null;
+    }
+
+    /** Save refreshed tokens without re-creating the client that just refreshed them. */
+    private async persistTokens(tokens: OAuthTokens) {
+        this.settings.googleAccessToken = tokens.accessToken;
+        this.settings.googleRefreshToken = tokens.refreshToken;
+        this.settings.tokenExpiresAt = tokens.expiresAt;
+        await this.saveData(this.settings);
     }
 
     async startOAuthFlow(): Promise<boolean> {
@@ -112,13 +134,13 @@ export default class DriveEmbedderPlugin extends Plugin {
         this.settings.googleAccessToken = '';
         this.settings.googleRefreshToken = '';
         this.settings.tokenExpiresAt = 0;
-        this.uploader = null;
+        this.renderer.clear();
         await this.saveSettings();
         new Notice('disconnected from Google Drive.');
     }
 
     isConnected(): boolean {
-        return !!this.settings.googleAccessToken && !!this.uploader;
+        return !!this.settings.googleAccessToken && !!this.driveClient;
     }
 
     private openUploadModal(editor?: Editor) {
@@ -182,6 +204,9 @@ class DriveEmbedderSettingTab extends PluginSettingTab {
         // Drive Settings
         this.createDriveSection(containerEl);
 
+        // Rendering Settings
+        this.createRenderingSection(containerEl);
+
         // Embed Settings
         this.createEmbedSection(containerEl);
 
@@ -218,6 +243,10 @@ class DriveEmbedderSettingTab extends PluginSettingTab {
                         });
                     })
                 );
+        } else if (Platform.isMobile) {
+            new Setting(connectionDiv)
+                .setName('Connect to Google Drive')
+                .setDesc('connect on desktop; the tokens reach this device with the vault\'s plugin folder');
         } else {
             new Setting(connectionDiv)
                 .setName('Connect to Google Drive')
@@ -284,6 +313,33 @@ class DriveEmbedderSettingTab extends PluginSettingTab {
             );
     }
 
+    private createRenderingSection(containerEl: HTMLElement) {
+        new Setting(containerEl)
+            .setName('Rendering')
+            .setHeading();
+
+        const numberSetting = (name: string, desc: string, key: 'autoLoadLimitMB' | 'cacheLimitMB') => {
+            new Setting(containerEl)
+                .setName(name)
+                .setDesc(desc)
+                .addText(text => {
+                    text.inputEl.type = 'number';
+                    text.inputEl.min = '0';
+                    text
+                        .setValue(String(this.plugin.settings[key]))
+                        .onChange((value) => {
+                            const parsed = Number(value);
+                            if (!Number.isFinite(parsed) || parsed < 0) return;
+                            this.plugin.settings[key] = parsed;
+                            void this.plugin.saveSettings();
+                        });
+                });
+        };
+
+        numberSetting('Auto-load limit (MB)', 'larger files show a load button instead of downloading when the note opens (0 = no limit)', 'autoLoadLimitMB');
+        numberSetting('Memory cache (MB)', 'downloaded files kept in memory while Obsidian is open', 'cacheLimitMB');
+    }
+
     private createEmbedSection(containerEl: HTMLElement) {
         new Setting(containerEl)
             .setName('Embed defaults')
@@ -296,20 +352,6 @@ class DriveEmbedderSettingTab extends PluginSettingTab {
                 .setValue(this.plugin.settings.showTitleByDefault)
                 .onChange((value) => {
                     this.plugin.settings.showTitleByDefault = value;
-                    void this.plugin.saveSettings();
-                })
-            );
-
-        new Setting(containerEl)
-            .setName('Default theme')
-            .setDesc('default embed theme (auto-detects system theme)')
-            .addDropdown(dropdown => dropdown
-                .addOption('auto', 'Auto (follows system)')
-                .addOption('light', 'Light')
-                .addOption('dark', 'Dark')
-                .setValue(this.plugin.settings.defaultTheme)
-                .onChange((value: 'auto' | 'light' | 'dark') => {
-                    this.plugin.settings.defaultTheme = value;
                     void this.plugin.saveSettings();
                 })
             );
@@ -389,7 +431,7 @@ class DriveEmbedderSettingTab extends PluginSettingTab {
         oauthStep1.appendText('go to ');
         oauthStep1.createEl('a', { text: 'Google Cloud Console', href: 'https://console.cloud.google.com', attr: { target: '_blank' } });
         oauthList.createEl('li', { text: 'create a new project or select an existing one' });
-        oauthList.createEl('li', { text: 'go to APIs & services → OAuth consent screen and configure' });
+        oauthList.createEl('li', { text: 'go to Google Auth Platform → Branding and Audience and configure the consent screen (publish it to avoid weekly re-login)' });
         oauthList.createEl('li', { text: 'go to APIs & services → Credentials → Create credentials → OAuth client ID' });
         oauthList.createEl('li', { text: 'select application type: desktop app' });
         oauthList.createEl('li', { text: 'enter the generated client ID and client secret in the settings above' });

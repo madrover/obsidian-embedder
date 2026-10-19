@@ -17,7 +17,10 @@ export const DEFAULT_SETTINGS: DriveEmbedderSettings = {
 
     // Embed settings
     showTitleByDefault: true,
-    defaultTheme: 'auto',
+
+    // Rendering
+    autoLoadLimitMB: 50,
+    cacheLimitMB: 200,
 
     // Default sizes per category
     defaultVideoSize: 'medium',

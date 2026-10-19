@@ -29,7 +29,6 @@ export interface SizeOption {
 export interface DriveUploadResult {
     fileId: string;
     webViewLink: string;
-    webContentLink: string;
     fileName: string;
     mimeType: string;
 }
@@ -42,7 +41,7 @@ export interface EmbedOptions {
 
 // Upload progress callback
 export interface UploadProgress {
-    stage: 'preparing' | 'uploading' | 'setting-permission' | 'complete' | 'error';
+    stage: 'preparing' | 'uploading' | 'complete' | 'error';
     message: string;
     progress: number; // 0-100
     error?: string;
@@ -70,7 +69,10 @@ export interface DriveEmbedderSettings {
 
     // Embed settings
     showTitleByDefault: boolean;
-    defaultTheme: 'light' | 'dark' | 'auto';
+
+    // Rendering (files are downloaded with the OAuth token)
+    autoLoadLimitMB: number;
+    cacheLimitMB: number;
 
     // Default sizes per category
     defaultVideoSize: string;
