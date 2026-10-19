@@ -59,6 +59,8 @@ var GoogleOAuthFlow = class {
     this.TOKEN_URL = "https://oauth2.googleapis.com/token";
     this.SCOPES = [
       "https://www.googleapis.com/auth/drive.file",
+      // Read any file the account can see, so embeds also work for files not uploaded by this plugin
+      "https://www.googleapis.com/auth/drive.readonly",
       "https://www.googleapis.com/auth/userinfo.email"
     ];
     this.server = null;
@@ -1240,9 +1242,9 @@ var EmbedRenderer = class {
     let text = error instanceof Error ? error.message : String(error);
     if (error instanceof DriveError) {
       if (error.status === 404) {
-        text = "File not found in Google Drive, or this plugin has no access to it.";
+        text = "File not found in Google Drive, or no access to it. If you connected before v1.1.1, reconnect in the plugin settings on desktop.";
       } else if (error.status === 403) {
-        text = "No access to this file. Only files created through this Google Cloud project can be shown.";
+        text = "No access to this file. If you connected before v1.1.1, reconnect to grant read access to Drive.";
       } else if (error.status === 401) {
         text = "Google Drive session expired. Reconnect in the plugin settings on desktop.";
       }

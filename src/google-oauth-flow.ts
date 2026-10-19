@@ -18,6 +18,8 @@ export class GoogleOAuthFlow {
     private readonly TOKEN_URL = 'https://oauth2.googleapis.com/token';
     private readonly SCOPES = [
         'https://www.googleapis.com/auth/drive.file',
+        // Read any file the account can see, so embeds also work for files not uploaded by this plugin
+        'https://www.googleapis.com/auth/drive.readonly',
         'https://www.googleapis.com/auth/userinfo.email'
     ];
 

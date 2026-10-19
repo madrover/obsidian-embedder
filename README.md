@@ -131,7 +131,7 @@ title: true
 
 - Your files are uploaded to **your own Google Drive** and stay private: no sharing permission is added
 - Embeds only render inside Obsidian, for the connected account; they do not work in Obsidian Publish or other Markdown viewers
-- The `drive.file` scope covers files created through the same Google Cloud project, so files uploaded by other tools using that project can be rendered too
+- Scopes: `drive.file` to upload, and `drive.readonly` so embeds also render files that were not uploaded by this plugin. The token can therefore read your whole Drive
 - OAuth tokens and the client secret are stored in plain text in the plugin's `data.json`: keep that file out of git or any shared sync
 - No third-party servers involved
 
